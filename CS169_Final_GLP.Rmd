@@ -1,0 +1,343 @@
+---
+title: "CS169_Final_GLP"
+author: "Evan Gray, Emilia Nathan, Tomer Wenderow"
+date: "2024-12-01"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(ape)
+library(qs)
+library(tidyverse)
+library(Seurat) #v4.1.0
+library(scCustomize) #v0.7.0.9938
+library(qs)
+library(data.table)
+library(mclust)
+```
+
+Create the Seurat Object
+```{r}
+#meta_path <- "/Users/evangray/Library/CloudStorage/Box-Box/metadata_mg_filtered.csv"
+#expression_path <- "/Users/evangray/Library/CloudStorage/Box-Box/expression_mg_filtered.csv"
+
+#expression_data <- read.csv(expression_path, row.names = 1)
+#metadata <- read.csv(meta_path, header = TRUE, row.names = 1)
+#metadata<- metadata[-1, ]
+```
+
+```{r}
+#glp_seurat <- CreateSeuratObject(counts = expression_data, meta.data = metadata)
+#saveRDS(glp_seurat, file = "/Users/evangray/Library/CloudStorage/Box-Box/glp_seurat_full.rds")
+```
+
+Read in the data
+```{r}
+glp_seurat <- readRDS("/Users/evangray/Library/CloudStorage/Box-Box/glp_seurat_full.rds")
+```
+
+Preprocessing and dimensionality reduction
+```{r}
+# Normalize the data
+glp_seurat <- NormalizeData(glp_seurat)
+
+# Identify variable features
+glp_seurat <- FindVariableFeatures(glp_seurat, selection.method = "vst", nfeatures = 2000)
+
+# Scale the data
+glp_seurat <- ScaleData(glp_seurat)
+
+# Perform PCA
+glp_seurat <- RunPCA(glp_seurat, features = VariableFeatures(glp_seurat))
+glp_seurat <- FindNeighbors(glp_seurat, dims = 1:10)
+```
+
+PCA explained
+```{r}
+pca_stdev <- glp_seurat@reductions[["pca"]]@stdev
+# Variance explained by each PC
+variance_explained <- (pca_stdev^2) / sum(pca_stdev^2) * 100
+cumulative_variance <- cumsum(variance_explained)
+
+# Plot cumulative variance
+ggplot(data.frame(PC = 1:length(cumulative_variance), CumulativeVariance = cumulative_variance),
+       aes(x = PC, y = CumulativeVariance)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Cumulative Variance Explained by PCs",
+       x = "Principal Component",
+       y = "Cumulative Percentage of Variance Explained")
+pc_variance_df <- data.frame(
+  PC = 1:length(variance_explained),
+  Variance = variance_explained
+)
+
+# Plot the variance explained
+library(ggplot2)
+ggplot(pc_variance_df, aes(x = PC, y = Variance)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Variance Explained by Principal Components",
+       x = "Principal Component",
+       y = "Percentage of Variance Explained")
+
+total_var <- 0
+# Print variance explained by first 10 PCs
+for (i in 1:50) {
+  cat(sprintf("PC%d explains %.2f%% of the variance\n", i, variance_explained[i]))
+  total_var <- total_var + variance_explained[i]
+}
+total_var
+```
+
+GLP K-Means
+```{r}
+glp_embeddings <- glp_seurat@reductions[["pca"]]@cell.embeddings
+```
+
+Elbow plot
+```{r}
+# Build an elbow plot to determine optimal clusters
+wcss <- numeric()
+
+for (k in 1:15) { 
+  kmeans_model <- kmeans(glp_embeddings, centers = k, nstart = 10, iter.max = 10000)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+elbow_plot <- data.frame(
+  Clusters = 1:15,
+  WCSS = wcss
+)
+
+ggplot(elbow_plot, aes(x = Clusters, y = WCSS)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Elbow Method for Optimal Clusters (GLP Data)") +
+  xlab("Number of Clusters (k)") +
+  ylab("Within-Cluster Sum of Squares")
+```
+
+Final K-Means Clustering
+```{r}
+glp_clusters <- kmeans(glp_embeddings, centers = 11, iter.max = 10000)
+glp_kmeans_clusters <- glp_clusters$cluster
+glp_seurat$seurat_clusters <- as.factor(glp_kmeans_clusters)
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+```
+
+Top 5 Expressed Genes from each cluster - K-Means
+```{r}
+average_expression_glp_km <- AverageExpression(glp_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_glp_km$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 Genes
+  top_genes <- head(sorted_genes, 5)
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Combine results
+most_expressed_genes_df_gk <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+
+most_expressed_genes_df_gk
+```
+save glp gene clusters - K-Means
+```{r}
+write.csv(most_expressed_genes_df_gk, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/GLP_K-Means_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Plot UMAP (K-Means)
+```{r}
+glp_clusters <- kmeans(glp_embeddings, centers = 11, iter.max = 10000)
+glp_kmeans_clusters <- glp_clusters$cluster
+glp_seurat$seurat_clusters <- as.factor(glp_kmeans_clusters)
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+# Visualize clusters
+DimPlot(glp_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of GLP Clusters (K-Means)")
+```
+
+
+GLP Hierarchical Clustering
+```{r}
+glp_seurat <- FindClusters(glp_seurat, method = "hierarchical", algorithm = 3)
+```
+Save Hierarchical Clusters
+```{r}
+glp_hierarchical_clusters <- as.factor(glp_seurat@meta.data[["seurat_clusters"]])
+```
+
+
+GLP Dendrogram
+```{r}
+# Build the hierarchical dendrogram
+glp_seurat <- BuildClusterTree(glp_seurat, dims = 1:10)
+
+# Plot the dendrogram
+PlotClusterTree(glp_seurat)
+```
+
+Top 5 Expressed Genes from each cluster - Hierarchical
+```{r}
+average_expression_glp_h <- AverageExpression(glp_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_glp_h$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression value
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 genes
+  top_genes <- head(sorted_genes, 5)
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+# Get them for each cluster
+most_expressed_genes_df_gh <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+
+most_expressed_genes_df_gh
+```
+
+save glp gene clusters - Hierarchical
+```{r}
+write.csv(most_expressed_genes_df_gh, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/GLP_Hierarchical_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Plot UMAP (Hierarchical)
+```{r}
+glp_seurat$seurat_clusters <- as.factor(glp_hierarchical_clusters)
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+DimPlot(glp_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of GLP Clusters (Hierarchical)")
+```
+
+Do the pruning
+```{r}
+custom_clusters <- c(
+  "1" = "c1", "12" = "c1", "6" = "c1", "2" = "c2",
+  "7" = "c2", "3" = "c2", "5" = "c10", "8" = "c2", "4" = "c2", "10" = "c2",
+  "11" = "c3",
+  "17" = "c4",
+  "13" = "c5",
+  "15" = "c6",
+  "9" = "c7",
+  "14" = "c9",
+  "16" = "c8"
+)
+custom_cs <- custom_clusters[glp_seurat$seurat_clusters]
+names(custom_cs) <- names(glp_seurat$seurat_clusters)
+glp_seurat$custom_clusters <- custom_cs
+```
+
+Plot UMAP (Hierarchical Pruned Clusters)
+```{r}
+glp_seurat$seurat_clusters <- as.factor(glp_hierarchical_clusters)
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+DimPlot(glp_seurat, reduction = "umap", group.by = "custom_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of GLP Clusters (Hierarchical with Pruning)")
+```
+
+Top 5 Expressed Genes from each cluster - GMM
+```{r}
+glp_seurat$seurat_clusters <- as.factor(glp_seurat$custom_clusters)
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+
+average_expression_glp_ghp <- AverageExpression(glp_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_glp_ghp$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 genes
+  top_genes <- head(sorted_genes, 5)
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Get them for each cluster
+most_expressed_genes_df_ghp <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+most_expressed_genes_df_ghp
+```
+
+save glp gene clusters - Hierarchical with Pruning
+```{r}
+write.csv(most_expressed_genes_df_ghp, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/GLP_Hierarchical_Pruning_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Run GMM Clustering
+```{r}
+# Took a long time to run
+#pca_data_glp <- glp_seurat@reductions$pca@cell.embeddings[, 1:35]
+#gmm_result_glp <- Mclust(pca_data_glp) 
+#saveRDS(gmm_result_glp, "/Users/evangray/Library/CloudStorage/Box-Box/glp_gmm_result.rds")
+```
+
+Load glp GMM
+```{r}
+glp_gmm <- readRDS("/Users/evangray/Library/CloudStorage/Box-Box/glp_gmm_result.rds")
+```
+
+Prepare results
+```{r}
+glp_seurat$seurat_clusters <- as.factor(glp_gmm[["classification"]])
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+```
+
+Top 5 Expressed Genes from each cluster - GMM
+```{r}
+average_expression_glp_gmm <- AverageExpression(glp_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_glp_gmm$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 genes
+  top_genes <- head(sorted_genes, 5)
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Ge
+most_expressed_genes_df_ggmm <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+most_expressed_genes_df_ggmm
+```
+save glp gene clusters - GMM
+```{r}
+write.csv(most_expressed_genes_df_ggmm, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/GLP_GMM_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Uncertainty totals - GMM
+```{r}
+# Get the uncertainty and assignments
+posterior_probs <- glp_gmm$z
+cluster_assignments <- glp_gmm$classification
+uncertainty <- 1 - apply(posterior_probs, 1, max)
+
+# Cumulative uncertainty per cluster
+total_uncertainty_per_cluster <- tapply(uncertainty, cluster_assignments, sum)
+total_uncertainty_per_cluster
+```
+
+
+Plot UMAP (GMM)
+```{r}
+glp_seurat$seurat_clusters <- as.factor(glp_gmm[["classification"]])
+Idents(glp_seurat) <- glp_seurat$seurat_clusters
+# Visualize clusters
+DimPlot(glp_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of GLP Clusters (GMM)")
+```
+
+
+```{r}
+# Visualize clusters
+DimPlot(glp_seurat, reduction = "umap", group.by = "biosample_id", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of GLP Clusters (Age)")
+```

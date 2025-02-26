@@ -1,0 +1,347 @@
+---
+title: "CS169_Final_Hammond"
+author: "Evan Gray, Emilia Nathan, Tomer Wenderow"
+date: "2024-12-03"
+output: html_document
+---
+
+---
+title: "Final_Project"
+author: "Evan Gray"
+date: "2024-11-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(ape)
+library(qs)
+library(tidyverse)
+library(Seurat) #v4.1.0
+library(scCustomize) #v0.7.0.9938
+library(qs)
+library(data.table)
+library(mclust)
+```
+
+
+```{r}
+library(qs)
+dt = qs::qread('Hammond_et-al-2019_Seurat_Converted_v4.qs') 
+counts = dt@assays$RNA@counts 
+cell_meta = dt@meta.data
+```
+
+Whole dataset
+```{r}
+dt = qs::qread('Hammond_et-al-2019_Seurat_Converted_v4.qs') 
+counts = dt@assays$RNA@counts 
+cell_meta = dt@meta.data
+hammond_seurat <- CreateSeuratObject(counts = counts, meta.data = cell_meta)
+# Normalize the data
+hammond_seurat <- NormalizeData(hammond_seurat)
+
+# Identify variable features
+hammond_seurat <- FindVariableFeatures(hammond_seurat, selection.method = "vst", nfeatures = 2000)
+
+# Scale the data
+hammond_seurat <- ScaleData(hammond_seurat)
+
+# Perform PCA
+hammond_seurat <- RunPCA(hammond_seurat, features = VariableFeatures(hammond_seurat))
+#seurat_subset <- RunICA(seurat_subset, nics = 50)
+```
+
+```{r}
+# Find neighbors
+hammond_seurat <- FindNeighbors(hammond_seurat, dims = 1:10)
+
+# Perform clustering
+hammond_seurat <- FindClusters(hammond_seurat, resolution = 0.5)
+
+# Visualize clusters using UMAP
+hammond_seurat <- RunUMAP(hammond_seurat, dims = 1:10)
+DimPlot(hammond_seurat, reduction = "umap", label = TRUE)
+```
+
+PCA embeddings of the hammond data
+```{r}
+hammond_embeddings <- hammond_seurat@reductions[["pca"]]@cell.embeddings
+```
+
+```{r}
+wcss <- numeric()
+
+for (k in 1:15) {
+  kmeans_model <- kmeans(hammond_embeddings, centers = k, nstart = 10, iter.max = 10000)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+```
+
+```{r}
+elbow_plot <- data.frame(
+  Clusters = 1:15,
+  WCSS = wcss
+)
+
+ggplot(elbow_plot, aes(x = Clusters, y = WCSS)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Elbow Method for Optimal Clusters (Hammond Data)") +
+  xlab("Number of Clusters (k)") +
+  ylab("Within-Cluster Sum of Squares")
+```
+
+Hammond K-Means UMAP
+```{r}
+hammond_clusters <- kmeans(hammond_embeddings, centers = 11, iter.max = 10000)
+kmeans_clusters <- hammond_clusters$cluster
+hammond_seurat$seurat_clusters <- as.factor(kmeans_clusters)
+Idents(hammond_seurat) <- hammond_seurat$seurat_clusters
+DimPlot(hammond_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hammond Clusters (K-Means)")
+```
+
+Average expression hammond k-means
+```{r}
+average_expression_kmeans <- AverageExpression(hammond_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_kmeans$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression value in descending order
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  top_genes <- head(sorted_genes, 5)
+  
+  # Dataframe with results
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Combine results
+most_expressed_genes_df_hk <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+most_expressed_genes_df_hk
+```
+
+Save the hammond k-means data
+```{r}
+write.csv(most_expressed_genes_df_hk, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/Hammond_K-Means_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Hammond PCA explained
+```{r}
+pca_stdev <- hammond_seurat@reductions[["pca"]]@stdev
+# Variance explained by each Principal Component
+variance_explained <- (pca_stdev^2) / sum(pca_stdev^2) * 100
+cumulative_variance <- cumsum(variance_explained)
+
+# Plot cumulative variance
+ggplot(data.frame(PC = 1:length(cumulative_variance), CumulativeVariance = cumulative_variance),
+       aes(x = PC, y = CumulativeVariance)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Cumulative Variance Explained by Principal Components (Hammond)",
+       x = "Principal Component",
+       y = "Cumulative Percentage of Variance Explained")
+
+pc_variance_df <- data.frame(
+  PC = 1:length(variance_explained),
+  Variance = variance_explained
+)
+
+ggplot(pc_variance_df, aes(x = PC, y = Variance)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Variance Explained by Principal Components",
+       x = "Principal Component",
+       y = "Percentage of Variance Explained")
+
+total_var <- 0
+
+for (i in 1:50) {
+  cat(sprintf("PC%d explains %.2f%% of the variance\n", i, variance_explained[i]))
+  total_var <- total_var + variance_explained[i]
+}
+total_var
+
+```
+
+Hammond Hierarchical Clustering
+```{r}
+hammond_seurat <- FindClusters(hammond_seurat, method = "hierarchical", algorithm = 3)
+```
+
+Save Hierarchical Clusters
+```{r}
+hammond_hierarchical_clusters <- as.factor(hammond_seurat@meta.data[["seurat_clusters"]])
+```
+
+```{r}
+#hammond_seurat <- RunUMAP(hammond_seurat, dims = 1:10)
+
+# Visualize clusters
+DimPlot(hammond_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hammond Clusters (Hierarchical)")
+```
+
+Visualize Hierarchical Clusters
+```{r}
+DimPlot(hammond_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hierarchical Clusters (Hammond)")
+```
+
+```{r}
+hammond_seurat@meta.data[["seurat_clusters"]]
+```
+
+Dendrogram
+```{r}
+# Build the hierarchical dendrogram
+hammond_seurat <- BuildClusterTree(hammond_seurat, dims = 1:10)
+# Plot the dendrogram
+PlotClusterTree(hammond_seurat)
+```
+
+Hammond average expressed genes per cluster
+```{r}
+average_expression <- AverageExpression(hammond_seurat, return.seurat = FALSE)
+avg_expr <- average_expression$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression value in descending order
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  
+  # Get the top 5 genes and their expression values
+  top_genes <- head(sorted_genes, 5)
+  
+  # Create a data frame with the results
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Combine the results into a single data frame
+most_expressed_genes_df_hh <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+# View the results
+most_expressed_genes_df_hh
+```
+
+Save hierarchical clusters
+```{r}
+write.csv(most_expressed_genes_df_hh, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/Hammond_Hierarchical_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Hammond GMMs
+```{r}
+# Took a long time to run and needed to do top 35 PCs
+#pca_data <- hammond_seurat@reductions$pca@cell.embeddings[, 1:35]
+#gmm_result <- Mclust(pca_data) 
+#saveRDS(gmm_result, "/Users/evangray/Library/CloudStorage/Box-Box/hammond_gmm_result.rds")
+```
+
+Save GMM so do not need to run again to analyze results
+```{r}
+hammond_gmm <- readRDS("/Users/evangray/Library/CloudStorage/Box-Box/hammond_gmm_result.rds")
+```
+
+For visualization
+```{r}
+hammond_seurat$seurat_clusters <- as.factor(hammond_gmm[["classification"]])
+Idents(hammond_seurat) <- hammond_seurat$seurat_clusters
+```
+
+Average Expression Hammond GMM
+```{r}
+average_expression_gmm <- AverageExpression(hammond_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_gmm$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression value in descending order
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 genes
+  top_genes <- head(sorted_genes, 5)
+  
+  # Create a data frame with the results
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+most_expressed_genes_df_hgmm <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+
+most_expressed_genes_df_hgmm
+```
+
+save hammond gmm gene clusters
+```{r}
+write.csv(most_expressed_genes_df_hgmm, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/Hammond_GMM_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Prepare results
+```{r}
+hammond_seurat$seurat_clusters <- as.factor(hammond_gmm[["classification"]])
+Idents(hammond_seurat) <- hammond_seurat$seurat_clusters
+```
+
+Plot UMAP (GMM)
+```{r}
+# Visualize clusters
+DimPlot(hammond_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hammond Clusters (GMM)")
+```
+
+
+Paper clustering results
+```{r}
+hammond_seurat$seurat_clusters <- as.factor(hammond_seurat@meta.data[["Paper_Cluster"]])
+Idents(hammond_seurat) <- hammond_seurat$seurat_clusters
+DimPlot(hammond_seurat, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hammond Clusters (Paper Results)")
+```
+
+Paper Top Genes
+```{r}
+average_expression_paper <- AverageExpression(hammond_seurat, return.seurat = FALSE)
+avg_expr <- average_expression_paper$RNA
+most_expressed_genes <- apply(avg_expr, 2, function(cluster_expr) {
+  # Sort the genes by expression value in descending order
+  sorted_genes <- sort(cluster_expr, decreasing = TRUE)
+  # Top 5 genes
+  top_genes <- head(sorted_genes, 5)
+  data.frame(Gene = names(top_genes), Expression = top_genes)
+})
+
+# Combine the results into a single data frame
+most_expressed_genes_df_paper <- do.call(rbind, lapply(names(most_expressed_genes), function(cluster) {
+  cbind(Cluster = cluster, most_expressed_genes[[cluster]])
+}))
+most_expressed_genes_df_paper
+```
+
+save hammond paper gene clusters
+```{r}
+write.csv(most_expressed_genes_df_paper, file = "/Users/evangray/Library/CloudStorage/Box-Box/bioinformatics_final/Hammond_Paper_Gene_Clusters.csv", row.names = FALSE)
+```
+
+Hammond GMM clusters
+```{r}
+# Get the uncertainty and assignments
+posterior_probs <- hammond_gmm$z
+cluster_assignments <- hammond_gmm$classification
+uncertainty <- 1 - apply(posterior_probs, 1, max)
+
+# Cumulative uncertainty per cluster
+total_uncertainty_per_cluster <- tapply(uncertainty, cluster_assignments, sum)
+total_uncertainty_per_cluster
+```
+
+Hammond UMAP by Age
+```{r}
+DimPlot(hammond_seurat, reduction = "umap", group.by = "Age", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Visualization of Hammond Clusters (Age)")
+```
